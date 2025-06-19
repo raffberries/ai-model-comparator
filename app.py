@@ -131,12 +131,14 @@ st.subheader("2. Unggah Gambar Anda")
 # Widget file uploader untuk pengguna mengunggah gambar
 uploaded_file = st.file_uploader("Pilih gambar dari komputer Anda (gambar orang lebih baik untuk deteksi manusia):", type=["jpg", "jpeg", "png", "webp"])
 
+# --- LOKASI PERBAIKAN UTAMA DIMULAI DI SINI ---
+# Periksa apakah file diunggah
 if uploaded_file is not None:
     image = Image.open(uploaded_file).convert('RGB') # Buka dan konversi gambar ke format RGB
-    st.image(image, caption='Uploaded Image', use_column_width=True) # Tampilkan gambar yang diunggah
+    st.image(image, caption='Gambar yang Diunggah', use_column_width=True) # Tampilkan gambar yang diunggah
 
-    # Tombol untuk memulai deteksi
-    if st.button("Mulai Deteksi Manusia", use_container_width=True): # Ubah teks tombol
+    # Tombol untuk memulai deteksi, hanya muncul setelah gambar diunggah
+    if st.button("Mulai Deteksi Manusia", use_container_width=True):
         if od_pipeline1 and od_pipeline2: # Pastikan kedua model berhasil dimuat
             st.markdown("---")
             st.header("3. Hasil Deteksi Manusia")
@@ -199,4 +201,3 @@ if uploaded_file is not None:
 
 st.markdown("---")
 st.markdown("Dibuat dengan ❤️ oleh Anda menggunakan Streamlit dan Hugging Face Transformers.")
-```</immersive>
