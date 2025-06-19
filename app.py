@@ -131,20 +131,19 @@ st.subheader("2. Unggah Gambar Anda")
 # Widget file uploader untuk pengguna mengunggah gambar
 uploaded_file = st.file_uploader("Pilih gambar dari komputer Anda (gambar orang lebih baik untuk deteksi manusia):", type=["jpg", "jpeg", "png", "webp"])
 
-# --- LOKASI UTAMA PERBAIKAN SINTAKS DIMULAI DI SINI ---
-
-# st.empty() untuk placeholder pesan
+# --- PENANGANAN LOGIKA SETELAH FILE DIUNGGAH DAN TOMBOL DIKLIK ---
+# st.empty() untuk placeholder pesan dinamis
 message_placeholder = st.empty() 
 
-# Logika aplikasi: hanya tampilkan tombol dan hasil jika file diunggah
-if uploaded_file is not None: 
+# Logika utama: Hanya tampilkan tombol dan hasil jika file diunggah
+if uploaded_file is not None: # Ini adalah kondisi IF untuk 'uploaded_file'
     image = Image.open(uploaded_file).convert('RGB')
     st.image(image, caption='Gambar yang Diunggah', use_column_width=True)
 
-    # Tombol untuk memulai deteksi
-    if st.button("Mulai Deteksi Manusia", use_container_width=True):
-        if od_pipeline1 and od_pipeline2: # Pastikan kedua model berhasil dimuat
-            message_placeholder.empty() # Hapus pesan placeholder
+    # Tombol untuk memulai deteksi, hanya muncul setelah gambar diunggah
+    if st.button("Mulai Deteksi Manusia", use_container_width=True): # Ini adalah kondisi IF untuk 'st.button'
+        if od_pipeline1 and od_pipeline2: # Ini adalah kondisi IF untuk model pipeline
+            message_placeholder.empty() # Hapus pesan placeholder jika berhasil
             st.markdown("---")
             st.header("3. Hasil Deteksi Manusia")
             
@@ -197,16 +196,19 @@ if uploaded_file is not None:
                 st.image(drawn_image2, caption=f"Hasil dari {model2_name_od}", use_column_width=True)
                 with st.expander("Lihat Detail Deteksi JSON"): # Expander untuk detail JSON
                     st.json(detections2)
-            else: # Ini adalah else untuk 'if od_pipeline1 and od_pipeline2:'
+            # Bagian ELSE ini dipasangkan dengan 'if od_pipeline1 and od_pipeline2:'
+            else: 
                 message_placeholder.error("❌ Pastikan kedua model berhasil dimuat sebelum mendeteksi. Periksa pesan error di atas.")
-        else: # Ini adalah else untuk 'if st.button("Mulai Deteksi Manusia", use_container_width=True):' ketika tombol diklik tetapi models tidak siap
-            message_placeholder.warning("⚠️ Ada masalah saat memuat model. Harap refresh halaman dan coba lagi.")
-
-# Ini adalah else untuk 'if uploaded_file is not None:'
-else: # Ini yang menangani kasus tidak ada file yang diunggah
+        # Tidak ada ELSE langsung untuk 'if st.button(...):' di sini.
+        # Jika tombol diklik dan pipeline gagal, error akan ditangani oleh else di atas.
+        # Jika tombol diklik dan semua baik, maka logic di atas berjalan.
+        # Jika tombol tidak diklik, maka kode di bawah ini akan berjalan (untuk uploaded_file is not None)
+    # Bagian ELSE ini dipasangkan dengan 'if uploaded_file is not None:'
+    else: 
+        message_placeholder.info("👆 Unggah gambar untuk memulai deteksi manusia.")
+# Bagian ELSE ini dipasangkan dengan 'if uploaded_file is not None:'
+else: 
     message_placeholder.info("👆 Unggah gambar untuk memulai deteksi manusia.")
-
-# --- AKHIR LOKASI PERBAIKAN SINTAKS ---
 
 st.markdown("---")
 st.markdown("Dibuat dengan ❤️ oleh Anda menggunakan Streamlit dan Hugging Face Transformers.")
