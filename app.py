@@ -6,18 +6,15 @@ import time
 import pandas as pd
 import os
 
-# Import MediaPipe
-import mediapipe as mp
-
-# Import Hugging Face for DETR
+# Import Hugging Face for DETR pipelines
 from transformers import pipeline
 
 # --- Konfigurasi Halaman Streamlit ---
 st.set_page_config(
     page_title="AI Model Comparator",
     page_icon="✨",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide", # Menggunakan layout lebar untuk tampilan konten yang lebih baik
+    initial_sidebar_state="expanded" # Sidebar dibuka secara default
 )
 
 # --- Judul dan Deskripsi Utama Aplikasi ---
@@ -26,65 +23,23 @@ st.markdown("""
 Aplikasi ini memungkinkan Anda untuk **membandingkan kinerja** dua model AI *pretrained* yang berbeda pada input yang sama.
 Pilih jenis tugas, model yang ingin dibandingkan, lalu masukkan input Anda.
 """)
-st.markdown("---")
+st.markdown("---") # Garis pemisah visual
 
 # Setel perangkat komputasi (GPU jika tersedia, jika tidak CPU)
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-# --- Utilitas Visualisasi Pose & Bounding Box (TANPA OpenCV) ---
-
-# Definisi koneksi keypoint untuk pose manusia (berdasarkan COCO dataset)
-# MediaPipe menyediakan ini secara internal, tapi ini untuk referensi menggambar manual
-POSE_CONNECTIONS = [
-    (0, 1), (0, 2), (1, 3), (2, 4), (5, 6), (5, 7), (6, 8), (7, 9), (8, 10),
-    (11, 12), (11, 13), (12, 14), (13, 15), (14, 16),
-    (5, 11), (6, 12) # Koneksi bahu ke pinggul
-]
-KEYPOINT_COLOR_POSE_RGB = (0, 255, 0) # Hijau (RGB)
-CONNECTION_COLOR_POSE_RGB = (255, 0, 0) # Merah (RGB)
-RADIUS_POSE = 5 # Radius lingkaran keypoint
-THICKNESS_POSE = 2 # Ketebalan garis koneksi
-
-def draw_pose_on_image_pil(image_pil, keypoints, connections):
-    """
-    Menggambar keypoint dan koneksi pose pada gambar PIL Image.
-    Args:
-        image_pil (PIL.Image.Image): Gambar PIL Image (RGB).
-        keypoints (list): Daftar keypoint, setiap keypoint adalah [x, y, confidence].
-        connections (list): Daftar tuple (idx1, idx2) yang menunjukkan koneksi antar keypoint.
-    Returns:
-        PIL.Image.Image: Gambar dengan pose yang digambar.
-    """
-    draw = ImageDraw.Draw(image_pil)
-    
-    # Gambar koneksi antar keypoint
-    for c in connections:
-        p1_idx, p2_idx = c
-        if (0 <= p1_idx < len(keypoints) and 0 <= p2_idx < len(keypoints)):
-            p1 = keypoints[p1_idx]
-            p2 = keypoints[p2_idx]
-            if len(p1) > 2 and p1[2] > 0.3 and len(p2) > 2 and p2[2] > 0.3:
-                draw.line([(p1[0], p1[1]), (p2[0], p2[1])], fill=CONNECTION_COLOR_POSE_RGB, width=THICKNESS_POSE)
-    
-    # Gambar setiap keypoint
-    for kp in keypoints:
-        if len(kp) > 2 and kp[2] > 0.3:
-            x, y, _ = kp
-            # Gambar lingkaran keypoint
-            draw.ellipse([x - RADIUS_POSE, y - RADIUS_POSE, x + RADIUS_POSE, y + RADIUS_POSE], fill=KEYPOINT_COLOR_POSE_RGB)
-    
-    return image_pil
-
-# Definisi warna dan ketebalan untuk Bounding Box (DETR)
-BBOX_COLOR_DETR_RGB = (0, 0, 255) # Biru (RGB)
+# --- Utilitas Visualisasi Bounding Box (Pillow-only) ---
+BBOX_COLOR_MODEL1_RGB = (255, 0, 0) # Merah (RGB) untuk model 1
+BBOX_COLOR_MODEL2_RGB = (0, 0, 255) # Biru (RGB) untuk model 2
 THICKNESS_BBOX = 2 # Ketebalan garis bounding box
 
-def draw_bbox_on_image_pil(image_pil, detections):
+def draw_bbox_on_image_pil(image_pil, detections, color_rgb):
     """
     Menggambar bounding box pada gambar PIL Image.
     Args:
         image_pil (PIL.Image.Image): Gambar PIL Image (RGB).
-        detections (list): Daftar deteksi, setiap deteksi adalah dict dengan 'box' (xmin, ymin, xmax, ymax), 'label', dan 'score'.
+        detections (list): Daftar deteksi, setiap deteksi adalah dict dengan 'box', 'label', dan 'score'.
+        color_rgb (tuple): Warna bounding box dalam format RGB (misal: (255, 0, 0) untuk merah).
     Returns:
         PIL.Image.Image: Gambar dengan bounding box yang digambar.
     """
@@ -105,7 +60,7 @@ def draw_bbox_on_image_pil(image_pil, detections):
             x1, y1, x2, y2 = int(box['xmin']), int(box['ymin']), int(box['xmax']), int(box['ymax'])
 
             # Gambar persegi panjang bounding box
-            draw.rectangle([x1, y1, x2, y2], outline=BBOX_COLOR_DETR_RGB, width=THICKNESS_BBOX)
+            draw.rectangle([x1, y1, x2, y2], outline=color_rgb, width=THICKNESS_BBOX)
             
             text = f"{label_name}: {score:.2f}"
             text_bbox = draw.textbbox((x1, y1), text, font=font)
@@ -113,25 +68,20 @@ def draw_bbox_on_image_pil(image_pil, detections):
             text_height = text_bbox[3] - text_bbox[1]
 
             # Gambar latar belakang teks
-            draw.rectangle([x1, y1 - text_height - 5, x1 + text_width + 5, y1], fill=BBOX_COLOR_DETR_RGB)
+            draw.rectangle([x1, y1 - text_height - 5, x1 + text_width + 5, y1], fill=color_rgb)
             draw.text((x1 + 2, y1 - text_height - 3), text, fill=(255, 255, 255), font=font)
     return image_pil
 
 # --- Fungsi untuk Memuat Model dengan Caching ---
 @st.cache_resource
 def load_sentiment_model(model_path):
+    """Memuat model analisis sentimen dari Hugging Face."""
     return pipeline("sentiment-analysis", model=model_path)
 
 @st.cache_resource
-def load_mediapipe_pose_model():
-    mp_pose = mp.solutions.pose
-    pose_mp = mp_pose.Pose(static_image_mode=True, min_detection_confidence=0.5, min_tracking_confidence=0.5)
-    return pose_mp
-
-@st.cache_resource
-def load_detr_pipeline():
-    detr_pipe = pipeline("object-detection", model="facebook/detr-resnet-50", device=0 if torch.cuda.is_available() else -1)
-    return detr_pipe
+def load_object_detection_pipeline(model_path):
+    """Memuat pipeline deteksi objek dari Hugging Face."""
+    return pipeline("object-detection", model=model_path, device=0 if torch.cuda.is_available() else -1)
 
 # --- Sidebar untuk Pilihan Utama (Jenis Tugas) ---
 with st.sidebar:
@@ -139,11 +89,11 @@ with st.sidebar:
     st.markdown("Pilih jenis tugas AI yang ingin Anda bandingkan:")
     task_type = st.radio(
         "Pilih Tugas:",
-        ("Analisis Sentimen (Teks)", "Estimasi Pose & Deteksi Objek"),
-        index=1 # Default ke "Estimasi Pose & Deteksi Objek"
+        ("Analisis Sentimen (Teks)", "Deteksi Objek"), # Ubah nama tugas
+        index=1 # Default ke "Deteksi Objek"
     )
     st.markdown("---")
-    st.info("💡 **Tips:** Untuk estimasi pose, unggah gambar yang jelas menunjukkan orang atau beberapa orang.")
+    st.info("💡 **Tips:** Unggah gambar dengan objek atau orang di dalamnya untuk hasil deteksi terbaik.")
 
 # --- Bagian Utama Aplikasi ---
 st.header("1. Pilih Model dan Unggah Input")
@@ -153,9 +103,9 @@ model_options_sentiment = {
     "DistilBERT Sentiment": "distilbert-base-uncased-finetuned-sst-2-english",
     "RoBERTa Twitter Sentiment": "cardiffnlp/twitter-roberta-base-sentiment"
 }
-model_options_vision = {
-    "MediaPipe Pose": "MediaPipe Pose",
-    "DETR Object Detector": "DETR Object Detector"
+model_options_object_detection = { # Opsi untuk deteksi objek
+    "DETR ResNet-50 (facebook/detr-resnet-50)": "facebook/detr-resnet-50",
+    "Tiny DETR ResNet-50 (microsoft/resnet-50-tiny-detr)": "microsoft/resnet-50-tiny-detr"
 }
 
 # Membuat dua kolom untuk pemilihan model berdampingan
@@ -227,50 +177,31 @@ if task_type == "Analisis Sentimen (Teks)":
         else:
             st.error("❌ Pastikan kedua model berhasil dimuat sebelum membandingkan.")
 
-# --- Logika untuk Estimasi Pose & Deteksi Objek (jika 'Estimasi Pose & Deteksi Objek' dipilih) ---
-elif task_type == "Estimasi Pose & Deteksi Objek":
+# --- Logika untuk Deteksi Objek (jika 'Deteksi Objek' dipilih) ---
+elif task_type == "Deteksi Objek":
     with col1:
-        st.subheader("Model 1 (Visi Komputer)")
-        model1_name_vision = st.selectbox(
+        st.subheader("Model 1 (Detektor Objek)")
+        model1_name_od = st.selectbox(
             "Pilih model pertama:",
-            list(model_options_vision.keys()),
+            list(model_options_object_detection.keys()),
             index=0,
-            key="vision_model1"
+            key="od_model1" # Key unik
         )
-        model1_instance = None
-        
-        if model1_name_vision == "MediaPipe Pose":
-            model1_instance = {"type": "mediapipe", "model": load_mediapipe_pose_model()}
-            st.success(f"'{model1_name_vision}' siap!")
-        elif model1_name_vision == "DETR Object Detector":
-            detr_pipe_instance = load_detr_pipeline()
-            model1_instance = {"type": "detr", "pipeline": detr_pipe_instance}
-            st.success(f"'{model1_name_vision}' siap!")
-        else:
-            st.error("Model tidak dikenali atau gagal dimuat.")
-            model1_instance = None
-
+        # Memuat pipeline deteksi objek
+        od_pipeline1 = load_object_detection_pipeline(model_options_object_detection[model1_name_od])
+        st.success(f"'{model1_name_od}' siap!")
 
     with col2:
-        st.subheader("Model 2 (Visi Komputer)")
-        model2_name_vision = st.selectbox(
+        st.subheader("Model 2 (Detektor Objek)")
+        model2_name_od = st.selectbox(
             "Pilih model kedua:",
-            list(model_options_vision.keys()),
+            list(model_options_object_detection.keys()),
             index=1,
-            key="vision_model2"
+            key="od_model2" # Key unik
         )
-        model2_instance = None
-
-        if model2_name_vision == "MediaPipe Pose":
-            model2_instance = {"type": "mediapipe", "model": load_mediapipe_pose_model()}
-            st.success(f"'{model2_name_vision}' siap!")
-        elif model2_name_vision == "DETR Object Detector":
-            detr_pipe_instance = load_detr_pipeline()
-            model2_instance = {"type": "detr", "pipeline": detr_pipe_instance}
-            st.success(f"'{model2_name_vision}' siap!")
-        else:
-            st.error("Model tidak dikenali atau gagal dimuat.")
-            model2_instance = None
+        # Memuat pipeline deteksi objek
+        od_pipeline2 = load_object_detection_pipeline(model_options_object_detection[model2_name_od])
+        st.success(f"'{model2_name_od}' siap!")
     
     st.markdown("---")
     st.subheader("Unggah Gambar Anda")
@@ -280,10 +211,10 @@ elif task_type == "Estimasi Pose & Deteksi Objek":
         image = Image.open(uploaded_file).convert('RGB')
         st.image(image, caption='Gambar yang Diunggah', use_column_width=True)
 
-        if st.button("Bandingkan Visi Komputer", use_container_width=True):
-            if model1_instance and model2_instance:
+        if st.button("Bandingkan Deteksi Objek", use_container_width=True):
+            if od_pipeline1 and od_pipeline2:
                 st.markdown("---")
-                st.header("3. Hasil Perbandingan Visi Komputer")
+                st.header("3. Hasil Perbandingan Deteksi Objek")
                 
                 col_res1, col_res2 = st.columns(2)
                 
@@ -293,64 +224,40 @@ elif task_type == "Estimasi Pose & Deteksi Objek":
 
                 # --- Prediksi dan Tampilan untuk Model 1 ---
                 with col_res1:
-                    st.info(f"**{model1_name_vision}**")
+                    st.info(f"**{model1_name_od}**")
                     start_time1 = time.time()
                     
-                    if model1_instance["type"] == "mediapipe":
-                        results = model1_instance["model"].process(np.array(image_for_model1))
-                        keypoints1 = []
-                        if results.pose_landmarks:
-                            for landmark in results.pose_landmarks.landmark:
-                                h, w, _ = np.array(image_for_model1).shape
-                                keypoints1.append([landmark.x * w, landmark.y * h, landmark.visibility])
-                        drawn_image1 = draw_pose_on_image_pil(image_for_model1, keypoints1, POSE_CONNECTIONS)
-                        st.write(f"**Jumlah Keypoint Terdeteksi:** {len(keypoints1)}")
-                        with st.expander("Lihat Detail Keypoint JSON"):
-                            st.json(keypoints1)
-                    elif model1_instance["type"] == "detr":
-                        detections1 = model1_instance["pipeline"](image_for_model1)
-                        drawn_image1 = draw_bbox_on_image_pil(image_for_model1, detections1)
-                        st.write(f"**Jumlah Objek Terdeteksi:** {len(detections1)}")
-                        with st.expander("Lihat Detail Deteksi JSON"):
-                            st.json(detections1)
+                    detections1 = od_pipeline1(image_for_model1)
+                    drawn_image1 = draw_bbox_on_image_pil(image_for_model1, detections1, BBOX_COLOR_MODEL1_RGB) # Berikan warna
                     
                     inference_time1 = time.time() - start_time1
+                    st.write(f"**Jumlah Objek Terdeteksi:** {len(detections1)}")
                     st.write(f"**Waktu Inferensi:** {inference_time1:.4f} detik")
-                    st.image(drawn_image1, caption=f"Hasil dari {model1_name_vision}", use_column_width=True)
+                    st.image(drawn_image1, caption=f"Hasil dari {model1_name_od}", use_column_width=True)
+                    with st.expander("Lihat Detail Deteksi JSON"):
+                        st.json(detections1)
                     
 
                 # --- Prediksi dan Tampilan untuk Model 2 ---
                 with col_res2:
-                    st.info(f"**{model2_name_vision}**")
+                    st.info(f"**{model2_name_od}**")
                     start_time2 = time.time()
                     
-                    if model2_instance["type"] == "mediapipe":
-                        results = model2_instance["model"].process(np.array(image_for_model2))
-                        keypoints2 = []
-                        if results.pose_landmarks:
-                            for landmark in results.pose_landmarks.landmark:
-                                h, w, _ = np.array(image_for_model2).shape
-                                keypoints2.append([landmark.x * w, landmark.y * h, landmark.visibility])
-                        drawn_image2 = draw_pose_on_image_pil(image_for_model2, keypoints2, POSE_CONNECTIONS)
-                        st.write(f"**Jumlah Keypoint Terdeteksi:** {len(keypoints2)}")
-                        with st.expander("Lihat Detail Keypoint JSON"):
-                            st.json(keypoints2)
-                    elif model2_instance["type"] == "detr":
-                        detections2 = model2_instance["pipeline"](image_for_model2)
-                        drawn_image2 = draw_bbox_on_image_pil(image_for_model2, detections2)
-                        st.write(f"**Jumlah Objek Terdeteksi:** {len(detections2)}")
-                        with st.expander("Lihat Detail Deteksi JSON"):
-                            st.json(detections2)
+                    detections2 = od_pipeline2(image_for_model2)
+                    drawn_image2 = draw_bbox_on_image_pil(image_for_model2, detections2, BBOX_COLOR_MODEL2_RGB) # Berikan warna berbeda
                     
                     inference_time2 = time.time() - start_time2
+                    st.write(f"**Jumlah Objek Terdeteksi:** {len(detections2)}")
                     st.write(f"**Waktu Inferensi:** {inference_time2:.4f} detik")
-                    st.image(drawn_image2, caption=f"Hasil dari {model2_name_vision}", use_column_width=True)
+                    st.image(drawn_image2, caption=f"Hasil dari {model2_name_od}", use_column_width=True)
+                    with st.expander("Lihat Detail Deteksi JSON"):
+                        st.json(detections2)
             else:
                 st.error("❌ Pastikan kedua model berhasil dimuat sebelum membandingkan. Periksa pesan error di atas.")
         else:
-            st.info("👆 Unggah gambar dan klik tombol 'Bandingkan Visi Komputer'.")
-    elif st.button("Bandingkan Visi Komputer"):
+            st.info("👆 Unggah gambar dan klik tombol 'Bandingkan Deteksi Objek'.")
+    elif st.button("Bandingkan Deteksi Objek"):
         st.warning("⚠️ Mohon unggah gambar terlebih dahulu untuk perbandingan.")
 
 st.markdown("---")
-st.markdown("Dibuat dengan ❤️ oleh Anda menggunakan Streamlit, MediaPipe, dan Hugging Face Transformers.")
+st.markdown("Dibuat dengan ❤️ oleh Anda menggunakan Streamlit dan Hugging Face Transformers.")
