@@ -131,14 +131,14 @@ st.subheader("2. Unggah Gambar Anda")
 # Widget file uploader untuk pengguna mengunggah gambar
 uploaded_file = st.file_uploader("Pilih gambar dari komputer Anda (gambar orang lebih baik untuk deteksi manusia):", type=["jpg", "jpeg", "png", "webp"])
 
-# --- LOKASI PERBAIKAN UTAMA DIMULAI DI SINI ---
-# Periksa apakah file diunggah
-if uploaded_file is not None:
+# --- PENANGANAN LOGIKA SETELAH FILE DIUNGGAH DAN TOMBOL DIKLIK ---
+# Ini adalah blok utama yang berisi logic setelah gambar diunggah dan tombol diklik.
+if uploaded_file is not None: # Mengecek apakah ada file yang diunggah
     image = Image.open(uploaded_file).convert('RGB') # Buka dan konversi gambar ke format RGB
     st.image(image, caption='Gambar yang Diunggah', use_column_width=True) # Tampilkan gambar yang diunggah
 
     # Tombol untuk memulai deteksi, hanya muncul setelah gambar diunggah
-    if st.button("Mulai Deteksi Manusia", use_container_width=True):
+    if st.button("Mulai Deteksi Manusia", use_container_width=True): # Mengecek apakah tombol diklik
         if od_pipeline1 and od_pipeline2: # Pastikan kedua model berhasil dimuat
             st.markdown("---")
             st.header("3. Hasil Deteksi Manusia")
@@ -147,6 +147,7 @@ if uploaded_file is not None:
             col_res1, col_res2 = st.columns(2)
             
             # Buat salinan gambar PIL untuk digambar oleh masing-masing model
+            # Ini penting agar kedua model menggambar di atas gambar asli yang sama
             image_for_model1 = image.copy()
             image_for_model2 = image.copy()
 
@@ -192,12 +193,19 @@ if uploaded_file is not None:
                 st.image(drawn_image2, caption=f"Hasil dari {model2_name_od}", use_column_width=True)
                 with st.expander("Lihat Detail Deteksi JSON"): # Expander untuk detail JSON
                     st.json(detections2)
-            else:
+            else: # Ini adalah else untuk 'if od_pipeline1 and od_pipeline2:'
                 st.error("❌ Pastikan kedua model berhasil dimuat sebelum mendeteksi. Periksa pesan error di atas.")
-        else:
-            st.info("👆 Unggah gambar dan klik tombol 'Mulai Deteksi Manusia'.")
-    elif st.button("Mulai Deteksi Manusia"): # Jika tombol diklik tanpa gambar diunggah
-        st.warning("⚠️ Mohon unggah gambar terlebih dahulu untuk deteksi.")
+        else: # Ini adalah else untuk 'if st.button("Mulai Deteksi Manusia", use_container_width=True):' ketika tombol diklik tetapi models tidak siap
+            st.info("👆 Klik tombol 'Mulai Deteksi Manusia' di atas untuk memulai deteksi.")
+
+# Ini adalah else untuk 'if uploaded_file is not None:'
+else: # Ini yang menangani kasus tidak ada file yang diunggah
+    st.info("👆 Unggah gambar untuk memulai deteksi manusia.")
+    # Opsional: Jika Anda ingin tombol "Mulai Deteksi Manusia" selalu ada bahkan tanpa file diunggah
+    # Anda bisa menempatkan st.button di sini, tapi akan memicu warning jika belum ada file.
+    # Misalnya:
+    # if st.button("Mulai Deteksi Manusia", use_container_width=True):
+    #     st.warning("⚠️ Mohon unggah gambar terlebih dahulu untuk deteksi.")
 
 st.markdown("---")
 st.markdown("Dibuat dengan ❤️ oleh Anda menggunakan Streamlit dan Hugging Face Transformers.")
