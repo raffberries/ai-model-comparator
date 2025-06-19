@@ -1,0 +1,10 @@
+streamlit
+transformers
+torch
+torchvision
+Pillow
+opencv-python
+mediapipe
+pandas
+matplotlib
+seaborn
