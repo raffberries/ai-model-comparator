@@ -3,7 +3,6 @@ transformers
 torch
 torchvision
 Pillow
-mediapipe==0.10.11 # Pastikan versi ini!
 pandas
 matplotlib
 seaborn
