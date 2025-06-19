@@ -1,8 +1,7 @@
 streamlit
+opencv-python
+Pillow
+ultralytics
 transformers
 torch
 torchvision
-Pillow
-pandas
-matplotlib
-seaborn
