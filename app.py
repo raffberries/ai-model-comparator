@@ -1,214 +1,315 @@
 import streamlit as st
+import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont # Import ImageDraw dan ImageFont untuk drawing
-import torch
+from PIL import Image
 import time
-import pandas as pd
-import os # Untuk os.path.exists (walaupun tidak dipakai langsung di sini, bagus untuk kebiasaan)
+import os
+import io
 
-# Import Hugging Face Transformers untuk model deteksi objek
-from transformers import pipeline
+# Import untuk YOLOv8
+from ultralytics import YOLO
 
-# --- Konfigurasi Halaman Streamlit ---
+# Import untuk DETR
+from transformers import DetrForObjectDetection, DetrImageProcessor
+import torch
+
+# --- Konfigurasi Streamlit ---
 st.set_page_config(
-    page_title="Human Detection App", # Judul halaman baru
-    page_icon="🚶", # Ikon deteksi manusia
-    layout="wide", # Menggunakan layout lebar
-    initial_sidebar_state="expanded" # Sidebar terbuka
+    page_title="Aplikasi Deteksi Manusia",
+    page_icon="🚶‍♂️",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# --- Judul dan Deskripsi Aplikasi Utama ---
-st.title("🚶 Aplikasi Deteksi Manusia") # Judul utama aplikasi
-st.markdown("""
-Aplikasi ini mendeteksi lokasi manusia (dan objek lain) dalam gambar menggunakan dua model AI yang berbeda.
-Ini adalah langkah dasar dalam analisis pose.
-""")
-st.markdown("---") # Garis pemisah visual
-
-# Setel perangkat komputasi (GPU jika tersedia, jika tidak CPU)
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-# --- Utilitas Visualisasi Bounding Box (Murni Pillow) ---
-# Warna berbeda untuk setiap model agar mudah dibedakan
-BBOX_COLOR_MODEL1_RGB = (255, 0, 0) # Merah (untuk Model 1)
-BBOX_COLOR_MODEL2_RGB = (0, 0, 255) # Biru (untuk Model 2)
-THICKNESS_BBOX = 2 # Ketebalan garis bounding box
-
-def draw_bbox_on_image_pil(image_pil, detections, color_rgb):
-    """
-    Menggambar bounding box dan label pada gambar PIL Image.
-    Args:
-        image_pil (PIL.Image.Image): Gambar PIL Image (RGB).
-        detections (list): Daftar deteksi, setiap deteksi adalah dict dengan 'box', 'label', dan 'score'.
-        color_rgb (tuple): Warna bounding box dalam format RGB (misal: (255, 0, 0) untuk merah).
-    Returns:
-        PIL.Image.Image: Gambar dengan bounding box yang digambar.
-    """
-    draw = ImageDraw.Draw(image_pil)
-    
-    # Mencoba memuat font default, fallback jika gagal
+# --- Fungsi Pemuatan Model (Menggunakan Cache untuk Efisiensi) ---
+@st.cache_resource
+def load_yolov8s_model():
+    """Memuat model YOLOv8s."""
     try:
-        font = ImageFont.truetype("LiberationSans-Regular.ttf", 20) 
-    except IOError:
-        font = ImageFont.load_default() # Fallback ke font default Pillow
+        model = YOLO('yolov8s.pt') # Mengunduh jika belum ada
+        st.success("Model YOLOv8s berhasil dimuat!")
+        return model
+    except Exception as e:
+        st.error(f"Gagal memuat model YOLOv8s: {e}")
+        return None
 
+@st.cache_resource
+def load_detr_model_and_processor():
+    """Memuat model DETR dan image processor."""
+    try:
+        processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50", revision="no_timm")
+        model = DetrForObjectDetection.from_pretrained("facebook/detr-resnet-50", revision="no_timm")
+        st.success("Model DETR berhasil dimuat!")
+        return processor, model
+    except Exception as e:
+        st.error(f"Gagal memuat model DETR: {e}. Pastikan koneksi internet Anda stabil.")
+        st.warning("Jika error berlanjut, coba instal torch dengan dukungan CUDA (jika ada GPU).")
+        return None, None
+
+# Muat model saat aplikasi dimulai
+yolov8s_model = load_yolov8s_model()
+detr_processor, detr_model = load_detr_model_and_processor()
+
+# Tentukan device (GPU jika tersedia, CPU jika tidak)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if detr_model:
+    detr_model.to(device)
+
+# --- Fungsi Deteksi ---
+def detect_yolov8s(model, image, confidence_threshold):
+    """
+    Melakukan deteksi objek menggunakan YOLOv8s.
+    Hanya mendeteksi 'person' (kelas 0 di COCO).
+    """
+    if model is None:
+        return []
+
+    results = model(image, conf=confidence_threshold)
+    detections = []
+    for r in results:
+        boxes = r.boxes.xyxy.cpu().numpy()
+        scores = r.boxes.conf.cpu().numpy()
+        classes = r.boxes.cls.cpu().numpy()
+
+        for i in range(len(boxes)):
+            # COCO class_id untuk 'person' adalah 0
+            if classes[i] == 0:
+                x1, y1, x2, y2 = map(int, boxes[i])
+                score = scores[i]
+                detections.append({
+                    'box': [x1, y1, x2, y2],
+                    'label': 'person',
+                    'score': score
+                })
+    return detections
+
+def detect_detr(processor, model, image, confidence_threshold):
+    """
+    Melakukan deteksi objek menggunakan DETR.
+    Hanya mendeteksi 'person'.
+    """
+    if processor is None or model is None:
+        return []
+
+    inputs = processor(images=image, return_tensors="pt").to(device)
+    outputs = model(**inputs)
+
+    # Mengubah output ke format yang mudah dibaca
+    target_sizes = torch.tensor([image.size[::-1]])
+    results = processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=confidence_threshold)[0]
+
+    detections = []
+    for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
+        # label mapping (COCO dataset)
+        # 91 kelas, 'person' adalah kelas 1
+        # Menggunakan COCO dataset labels, index 1 adalah 'person'
+        # Pastikan mapping label sudah benar
+        # (Anda mungkin perlu membuat dictionary mapping index ke nama kelas)
+        # DetrImageProcessor.post_process_object_detection sudah memberikan label nama kelas
+        
+        # Contoh mapping label untuk DETR jika diperlukan
+        # labels dari DETR adalah index COCO.
+        # Person adalah index 0 di COCO dataset asli, atau 1 di HF transformers dataset
+        # Cek: https://huggingface.co/facebook/detr-resnet-50/blob/main/config.json
+        # id2label": {"0": "N/A", "1": "person", ...}
+        
+        if model.config.id2label[label.item()] == "person": # Pastikan ini sesuai dengan ID person
+            x1, y1, x2, y2 = box.cpu().numpy().astype(int)
+            detections.append({
+                'box': [x1, y1, x2, y2],
+                'label': 'person',
+                'score': score.item()
+            })
+    return detections
+
+def draw_boxes(image_np, detections):
+    """Menggambar bounding box pada gambar NumPy array."""
+    image_copy = image_np.copy()
     for det in detections:
-        box = det['box']
-        label_name = det['label'] # Nama label (misal: 'person', 'car')
+        x1, y1, x2, y2 = det['box']
+        label = det['label']
         score = det['score']
 
-        if score > 0.7: # Gambar hanya jika confidence di atas ambang batas (dapat disesuaikan)
-            x1, y1, x2, y2 = int(box['xmin']), int(box['ymin']), int(box['xmax']), int(box['ymax'])
+        cv2.rectangle(image_copy, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        text = f"{label}: {score:.2f}"
+        cv2.putText(image_copy, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    return image_copy
 
-            # Gambar persegi panjang bounding box
-            draw.rectangle([x1, y1, x2, y2], outline=color_rgb, width=THICKNESS_BBOX)
-            
-            # Persiapkan teks label
-            text = f"{label_name}: {score:.2f}"
-            text_bbox = draw.textbbox((x1, y1), text, font=font)
-            text_width = text_bbox[2] - text_bbox[0]
-            text_height = text_bbox[3] - text_bbox[1]
+# --- Sidebar ---
+st.sidebar.header("Pengaturan Aplikasi")
 
-            # Gambar latar belakang teks agar lebih mudah dibaca
-            draw.rectangle([x1, y1 - text_height - 5, x1 + text_width + 5, y1], fill=color_rgb)
-            # Gambar teks label
-            draw.text((x1 + 2, y1 - text_height - 3), text, fill=(255, 255, 255), font=font)
-    return image_pil
+detection_model_choice = st.sidebar.radio(
+    "Pilih Model Deteksi:",
+    ("YOLOv8s", "DETR")
+)
 
-# --- Fungsi untuk Memuat Model dengan Caching ---
-# st.cache_resource akan memastikan model hanya diunduh dan dimuat sekali per sesi aplikasi
-@st.cache_resource
-def load_object_detection_pipeline(model_path):
-    """
-    Memuat pipeline deteksi objek dari Hugging Face.
-    Args:
-        model_path (str): ID model dari Hugging Face Hub (misal: "facebook/detr-resnet-50").
-    Returns:
-        transformers.Pipeline: Pipeline deteksi objek yang dimuat.
-    """
-    return pipeline("object-detection", model=model_path, device=0 if torch.cuda.is_available() else -1)
+confidence_threshold = st.sidebar.slider(
+    "Threshold Keyakinan Deteksi:",
+    min_value=0.0, max_value=1.0, value=0.5, step=0.05,
+    help="Ambang batas kepercayaan untuk deteksi objek. Deteksi di bawah nilai ini akan diabaikan."
+)
 
-# --- Bagian Utama Aplikasi ---
-st.header("1. Pilih Model Deteksi Manusia dan Unggah Gambar")
+st.sidebar.markdown("---")
+st.sidebar.header("Tentang Aplikasi")
+st.sidebar.info(
+    "Aplikasi prototipe ini dikembangkan untuk mendemonstrasikan perbandingan dua algoritma deteksi objek mutakhir: "
+    "**YOLOv8s** (You Only Look Once versi 8 small) dan **DETR** (DEtection TRansformer). "
+    "Fokus utama adalah deteksi manusia dalam gambar dan video."
+)
 
-# Kamus pilihan model deteksi objek
-model_options_object_detection = {
-    "DETR ResNet-50 (facebook/detr-resnet-50)": "facebook/detr-resnet-50",
-    "YOLOv8s (ultralytics/yolov8s)": "ultralytics/yolov8s" # Model YOLOv8s
+st.sidebar.markdown("---")
+st.sidebar.header("Identitas Pengembang")
+st.sidebar.write("Nama: [Nama Anda/Tim Anda]")
+st.sidebar.write("Institusi: [Institusi Anda]")
+st.sidebar.write("Versi: 1.0.0")
+
+st.sidebar.markdown("---")
+st.sidebar.header("Cara Penggunaan")
+st.sidebar.markdown("""
+1.  **Pilih Model Deteksi** di sidebar.
+2.  **Atur Threshold Keyakinan** di sidebar.
+3.  **Unggah Gambar** atau **Video** di area utama.
+4.  Klik tombol **"Deteksi dengan [Nama Model]"**.
+5.  Lihat hasilnya dan perbandingan kinerja model.
+""")
+
+
+# --- Main Content ---
+st.title("🚶‍♂️ Aplikasi Deteksi Manusia")
+st.markdown("Aplikasi ini membandingkan kinerja **YOLOv8s** dan **DETR** untuk deteksi manusia.")
+
+st.markdown("""
+<style>
+.stButton>button {
+    background-color: #4CAF50; /* Green */
+    color: white;
+    padding: 10px 24px;
+    border: none;
+    border-radius: 8px;
+    font-size: 16px;
+    cursor: pointer;
+    box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2);
+    transition: 0.3s;
 }
+.stButton>button:hover {
+    background-color: #45a049;
+    box-shadow: 0 8px 16px 0 rgba(0,0,0,0.2);
+}
+.stSpinner > div > div {
+    font-size: 1.2em;
+    color: #4CAF50;
+}
+</style>
+""", unsafe_allow_html=True)
 
-# Membuat dua kolom untuk pemilihan model berdampingan
-col1, col2 = st.columns(2)
 
-# --- Pemilihan Model 1 ---
-with col1:
-    st.subheader("Model 1 (Detektor Manusia)")
-    model1_name_od = st.selectbox(
-        "Pilih model pertama:",
-        list(model_options_object_detection.keys()),
-        index=0,
-        key="od_model1" # Key unik untuk widget Streamlit
+col_upload, col_results = st.columns([1, 2])
+
+with col_upload:
+    st.header("Unggah Media")
+    uploaded_file = st.file_uploader(
+        "Pilih gambar atau video...",
+        type=["jpg", "jpeg", "png", "mp4", "avi", "mov"],
+        help="Unggah file gambar (JPG, JPEG, PNG) atau video (MP4, AVI, MOV) untuk dideteksi."
     )
-    # Memuat pipeline deteksi objek untuk Model 1
-    od_pipeline1 = load_object_detection_pipeline(model_options_object_detection[model1_name_od])
-    st.success(f"'{model1_name_od}' siap digunakan!")
 
-# --- Pemilihan Model 2 ---
-with col2:
-    st.subheader("Model 2 (Detektor Manusia)")
-    model2_name_od = st.selectbox(
-        "Pilih model kedua:",
-        list(model_options_object_detection.keys()),
-        index=1,
-        key="od_model2" # Key unik untuk widget Streamlit
-    )
-    # Memuat pipeline deteksi objek untuk Model 2
-    od_pipeline2 = load_object_detection_pipeline(model_options_object_detection[model2_name_od])
-    st.success(f"'{model2_name_od}' siap digunakan!")
+    if uploaded_file is not None:
+        file_type = uploaded_file.type
+        st.subheader("File Asli")
+        if "image" in file_type:
+            image_pil = Image.open(uploaded_file)
+            st.image(image_pil, caption="Gambar Asli", use_column_width=True)
+            image_np = np.array(image_pil) # Convert PIL Image to NumPy array for OpenCV
+            image_np_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB) # Streamlit displays RGB, OpenCV reads BGR
 
+            if st.button(f"Deteksi dengan **{detection_model_choice}**"):
+                with col_results:
+                    st.subheader("Hasil Deteksi & Perbandingan")
+                    st.write(f"Mendeteksi dengan **{detection_model_choice}**...")
+
+                    start_time = time.time()
+                    detections = []
+                    num_detections = 0
+
+                    if detection_model_choice == "YOLOv8s":
+                        if yolov8s_model:
+                            with st.spinner("Memproses gambar dengan YOLOv8s..."):
+                                detections = detect_yolov8s(yolov8s_model, image_np_rgb, confidence_threshold)
+                        else:
+                            st.error("Model YOLOv8s tidak tersedia. Silakan cek pesan error saat pemuatan.")
+                    elif detection_model_choice == "DETR":
+                        if detr_processor and detr_model:
+                            with st.spinner("Memproses gambar dengan DETR..."):
+                                detections = detect_detr(detr_processor, detr_model, image_pil, confidence_threshold)
+                        else:
+                            st.error("Model DETR tidak tersedia. Silakan cek pesan error saat pemuatan.")
+
+                    end_time = time.time()
+                    inference_time = end_time - start_time
+                    num_detections = len(detections)
+
+                    if detections:
+                        processed_image_np = draw_boxes(image_np_rgb, detections)
+                        st.image(processed_image_np, caption=f"Hasil Deteksi ({detection_model_choice})", use_column_width=True)
+                        st.success(f"Deteksi selesai! Ditemukan {num_detections} manusia.")
+                    else:
+                        st.warning("Tidak ada manusia terdeteksi.")
+
+                    st.subheader("Metrik Kinerja")
+                    st.markdown(f"""
+                    | Metrik                  | Nilai                       |
+                    | :---------------------- | :-------------------------- |
+                    | Model Digunakan         | **{detection_model_choice}**|
+                    | Waktu Inferensi         | **{inference_time:.4f} detik** |
+                    | Jumlah Objek Terdeteksi | **{num_detections}** |
+                    """)
+
+                    st.markdown("---")
+                    st.subheader("Perbandingan Model (Estimasi)")
+                    st.info("Nilai ini adalah estimasi berdasarkan inferensi saat ini dan dapat bervariasi. Untuk perbandingan akurat, jalankan kedua model pada gambar yang sama secara terpisah.")
+                    # Placeholder for comparison table
+                    st.markdown("""
+                    | Metrik             | YOLOv8s (Contoh Rata-rata) | DETR (Contoh Rata-rata)    |
+                    | :----------------- | :------------------------- | :------------------------- |
+                    | Waktu Inferensi    | Cepat (0.05 - 0.2 detik)   | Agak Lambat (0.1 - 0.5 detik) |
+                    | Akurasi (Ideal)    | Tinggi                     | Sangat Tinggi              |
+                    | Ukuran Model       | Relatif Kecil              | Agak Besar                 |
+                    """)
+                    st.markdown("""
+                    **Catatan:** YOLOv8s umumnya lebih cepat untuk inferensi real-time, sementara DETR, meskipun lebih kompleks dan seringkali lebih akurat pada dataset besar, bisa lebih lambat karena arsitektur Transformer-nya.
+                    """)
+
+
+        elif "video" in file_type:
+            st.video(uploaded_file)
+            st.warning("Deteksi video akan segera tersedia! Fitur ini membutuhkan pemrosesan frame-by-frame yang lebih kompleks dan mungkin memakan waktu di Streamlit.")
+            st.info("Untuk deteksi video, Anda dapat mengunduh file video dan memprosesnya secara offline menggunakan skrip Python yang terpisah.")
+            # Placeholder for video processing logic
+            # video_bytes = uploaded_file.read()
+            # temp_video_path = "temp_video.mp4"
+            # with open(temp_video_path, "wb") as f:
+            #     f.write(video_bytes)
+
+            # if st.button(f"Mulai Deteksi Video dengan {detection_model_choice}"):
+            #     st.info("Memulai pemrosesan video. Ini bisa memakan waktu lama...")
+            #     # Your video processing logic here
+            #     # e.g., using OpenCV to read frames, detect, and save new video
+            #     # Then display the processed video
+            #     st.warning("Video processing feature is under development.")
+            #     os.remove(temp_video_path)
+
+
+    else:
+        with col_results:
+            st.info("Silakan unggah gambar atau video di sisi kiri untuk memulai deteksi.")
+
+# --- Footer / Credits ---
 st.markdown("---")
-st.subheader("2. Unggah Gambar Anda")
-# Widget file uploader untuk pengguna mengunggah gambar
-uploaded_file = st.file_uploader("Pilih gambar dari komputer Anda (gambar orang lebih baik untuk deteksi manusia):", type=["jpg", "jpeg", "png", "webp"])
-
-# --- PENANGANAN LOGIKA SETELAH FILE DIUNGGAH DAN TOMBOL DIKLIK ---
-# st.empty() untuk placeholder pesan dinamis
-message_placeholder = st.empty() 
-
-# Logika utama: Hanya tampilkan tombol dan hasil jika file diunggah
-if uploaded_file is not None: # Ini adalah kondisi IF untuk 'uploaded_file'
-    image = Image.open(uploaded_file).convert('RGB')
-    st.image(image, caption='Gambar yang Diunggah', use_column_width=True)
-
-    # Tombol untuk memulai deteksi, hanya muncul setelah gambar diunggah
-    if st.button("Mulai Deteksi Manusia", use_container_width=True): # Ini adalah kondisi IF untuk 'st.button'
-        if od_pipeline1 and od_pipeline2: # Ini adalah kondisi IF untuk model pipeline
-            message_placeholder.empty() # Hapus pesan placeholder jika berhasil
-            st.markdown("---")
-            st.header("3. Hasil Deteksi Manusia")
-            
-            # Membuat dua kolom untuk menampilkan hasil berdampingan
-            col_res1, col_res2 = st.columns(2)
-            
-            # Buat salinan gambar PIL untuk digambar oleh masing-masing model
-            image_for_model1 = image.copy()
-            image_for_model2 = image.copy()
-
-            # --- Deteksi dan Tampilan untuk Model 1 ---
-            with col_res1:
-                st.info(f"**{model1_name_od}**")
-                start_time1 = time.time() # Mulai hitung waktu inferensi
-                
-                detections1 = od_pipeline1(image_for_model1) # Lakukan deteksi
-                # Gambar bounding box pada salinan gambar untuk Model 1
-                drawn_image1 = draw_bbox_on_image_pil(image_for_model1, detections1, BBOX_COLOR_MODEL1_RGB) 
-                
-                inference_time1 = time.time() - start_time1 # Selesai hitung waktu
-                
-                # Filter hanya deteksi 'person' untuk jumlah yang relevan
-                person_count1 = sum(1 for det in detections1 if det['label'] == 'person')
-
-                st.write(f"**Manusia Terdeteksi:** {person_count1} (Total Objek: {len(detections1)})")
-                st.write(f"**Waktu Inferensi:** {inference_time1:.4f} detik")
-                # Tampilkan gambar hasil
-                st.image(drawn_image1, caption=f"Hasil dari {model1_name_od}", use_column_width=True)
-                with st.expander("Lihat Detail Deteksi JSON"): # Expander untuk detail JSON
-                    st.json(detections1)
-                
-
-            # --- Deteksi dan Tampilan untuk Model 2 ---
-            with col_res2:
-                st.info(f"**{model2_name_od}**")
-                start_time2 = time.time() # Mulai hitung waktu inferensi
-                
-                detections2 = od_pipeline2(image_for_model2) # Lakukan deteksi
-                # Gambar bounding box pada salinan gambar untuk Model 2
-                drawn_image2 = draw_bbox_on_image_pil(image_for_model2, detections2, BBOX_COLOR_MODEL2_RGB) 
-                
-                inference_time2 = time.time() - start_time2 # Selesai hitung waktu
-                
-                # Filter hanya deteksi 'person' untuk jumlah yang relevan
-                person_count2 = sum(1 for det in detections2 if det['label'] == 'person')
-
-                st.write(f"**Manusia Terdeteksi:** {person_count2} (Total Objek: {len(detections2)})")
-                st.write(f"**Waktu Inferensi:** {inference_time2:.4f} detik")
-                # Tampilkan gambar hasil
-                st.image(drawn_image2, caption=f"Hasil dari {model2_name_od}", use_column_width=True)
-                with st.expander("Lihat Detail Deteksi JSON"): # Expander untuk detail JSON
-                    st.json(detections2)
-            # Bagian ELSE ini dipasangkan dengan 'if od_pipeline1 and od_pipeline2:'
-            else: 
-                message_placeholder.error("❌ Pastikan kedua model berhasil dimuat sebelum mendeteksi. Periksa pesan error di atas.")
-        # Tidak ada ELSE langsung untuk 'if st.button(...):' di sini.
-        # Jika tombol diklik dan pipeline gagal, error akan ditangani oleh else di atas.
-        # Jika tombol diklik dan semua baik, maka logic di atas berjalan.
-        # Jika tombol tidak diklik, maka kode di bawah ini akan berjalan (untuk uploaded_file is not None)
-    # Bagian ELSE ini dipasangkan dengan 'if uploaded_file is not None:'
-    else: 
-        message_placeholder.info("👆 Unggah gambar untuk memulai deteksi manusia.")
-# Bagian ELSE ini dipasangkan dengan 'if uploaded_file is not None:'
-else: 
-    message_placeholder.info("👆 Unggah gambar untuk memulai deteksi manusia.")
-
-st.markdown("---")
-st.markdown("Dibuat dengan ❤️ oleh Anda menggunakan Streamlit dan Hugging Face Transformers.")
+st.markdown(
+    """
+    <div style="text-align: center; color: grey; font-size: 0.9em;">
+        Dibuat dengan ❤️ oleh [Nama Anda/Tim Anda] | Sumber Data Model: COCO Dataset | Model: <a href="https://docs.ultralytics.com/yolov8/" target="_blank">YOLOv8s (Ultralytics)</a>, <a href="https://huggingface.co/facebook/detr-resnet-50" target="_blank">DETR (Facebook AI)</a> | Powered by Streamlit
+    </div>
+    """,
+    unsafe_allow_html=True
+)
