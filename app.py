@@ -308,7 +308,7 @@ st.markdown("---")
 st.markdown(
     """
     <div style="text-align: center; color: grey; font-size: 0.9em;">
-        Dibuat dengan ❤️ oleh [Nama Anda/Tim Anda] | Sumber Data Model: COCO Dataset | Model: <a href="https://docs.ultralytics.com/yolov8/" target="_blank">YOLOv8s (Ultralytics)</a>, <a href="https://huggingface.co/facebook/detr-resnet-50" target="_blank">DETR (Facebook AI)</a> | Powered by Streamlit
+        Dibuat oleh Rafi Algihari | Sumber Data Model: COCO Dataset | Model: <a href="https://docs.ultralytics.com/yolov8/" target="_blank">YOLOv8s (Ultralytics)</a>, <a href="https://huggingface.co/facebook/detr-resnet-50" target="_blank">DETR (Facebook AI)</a> | Powered by Streamlit
     </div>
     """,
     unsafe_allow_html=True
